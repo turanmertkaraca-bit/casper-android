@@ -19,14 +19,28 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Locate the preinstalled Android SDK
+        run: |
+          # GitHub's ubuntu-latest runner ships the Android SDK at
+          # $ANDROID_SDK_ROOT. Do not use android-actions/setup-android: it
+          # currently fails with "Failed to find package 'tools'" and takes the
+          # whole job down. The SDK is already there; just locate and report it.
+          set -e
+          SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          test -d "$SDK" || { echo "::error::no Android SDK at $SDK"; exit 1; }
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "SDK at $SDK"
+          ls "$SDK/build-tools" || true
+          BT=$(ls -d "$SDK"/build-tools/* 2>/dev/null | sort -V | tail -1)
+          echo "build-tools: $BT"
+          test -n "$BT" || { echo "::error::no build-tools installed"; exit 1; }
+          ls "$SDK/platforms" || true
 
       - name: Build the shell APK
         run: |
           # aapt2/d8/zipalign/apksigner all come from the SDK; the repo's
           # build script prefers the native binaries on x86_64 runners.
-          ANDROID_HOME="$ANDROID_SDK_ROOT" ./shell/build.sh
+          ./shell/build.sh
 
       - name: Verify the APK is a valid HOME activity
         run: |
@@ -35,7 +49,7 @@ jobs:
           test -f "$APK"
           # A desktop shell must declare CATEGORY_HOME, or it can never replace
           # the launcher and the whole project premise fails on device.
-          BT=$(ls -d "$ANDROID_SDK_ROOT"/build-tools/* | sort -V | tail -1)
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
           "$BT/aapt2" dump xmltree "$APK" --file AndroidManifest.xml \
             | grep -q 'android.intent.category.HOME' \
             || { echo "::error::APK does not declare CATEGORY_HOME"; exit 1; }
@@ -106,18 +120,33 @@ jobs:
           grep -qE '^CONFIG_SECURITY_SELINUX=y$' .config   || { echo "::error::SELinux missing"; FAIL=1; }
           grep -qE '^CONFIG_SND_SOC_INTEL_BYTCR_RT5640_MACH=y$' .config \
             || { echo "::error::RT5640 audio machine driver missing (no sound on this tablet)"; FAIL=1; }
-          grep -qE '^CONFIG_RTL8723BS=y$' .config          || { echo "::error::RTL8723BS Wi-Fi missing"; FAIL=1; }
+          # RTL8723BS is a module by necessity — its Kconfig has `depends on m`,
+          # so it can never be =y. Asserting =y here would be unsatisfiable and
+          # would fail for the wrong reason.
+          grep -qE '^CONFIG_RTL8723BS=m$' .config          || { echo "::error::RTL8723BS Wi-Fi missing (must be =m)"; FAIL=1; }
+          grep -qE '^CONFIG_CFG80211=m$' .config           || { echo "::error::CFG80211 missing (RTL8723BS needs it)"; FAIL=1; }
+          grep -qE '^CONFIG_WLAN=y$' .config               || { echo "::error::WLAN missing"; FAIL=1; }
           grep -qE '^CONFIG_DRM_I915=y$' .config           || { echo "::error::i915 missing"; FAIL=1; }
           exit $FAIL
 
-      - name: Build bzImage
+      - name: Build bzImage and modules
         run: |
           set -e
           cd "linux-$KVER"
-          make ARCH=x86_64 -j"$(nproc)" bzImage
+          # RTL8723BS can only be built as a module, and module builds fail with
+          # "No rule to make target 'debian/certs/...'" when the default config
+          # expects distro signing keys that do not exist here. Disable module
+          # signing explicitly rather than relying on the runner's toolchain.
+          ./scripts/config --disable MODULE_SIG --disable DEBUG_INFO
+          make ARCH=x86_64 olddefconfig
+          make ARCH=x86_64 -j"$(nproc)" bzImage modules
           file arch/x86/boot/bzImage | tee /tmp/kernel-file.txt
           grep -q 'x86-64' /tmp/kernel-file.txt \
             || { echo "::error::bzImage is not 64-bit"; exit 1; }
+          # The Wi-Fi driver must exist as a module, since =y is impossible.
+          find . -name 'rtl8723bs.ko*' | head -3
+          find . -name 'rtl8723bs.ko*' | grep -q . \
+            || { echo "::error::rtl8723bs.ko was not built"; exit 1; }
           # Mixed mode is what lets IA32 firmware enter this kernel. Confirm the
           # thunk is actually present in the built image, not just in .config.
           if command -v nm >/dev/null && [ -f vmlinux ]; then
@@ -132,3 +161,4 @@ jobs:
           path: |
             linux-6.12/arch/x86/boot/bzImage
             linux-6.12/.config
+            linux-6.12/**/rtl8723bs.ko*

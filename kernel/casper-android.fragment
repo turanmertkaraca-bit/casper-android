@@ -113,7 +113,17 @@ CONFIG_MMC=y
 CONFIG_MMC_SDHCI=y
 CONFIG_MMC_SDHCI_ACPI=y
 CONFIG_STAGING=y
-CONFIG_RTL8723BS=y
+# RTL8723BS can ONLY be a module: drivers/staging/rtl8723bs/Kconfig declares
+# `depends on m`, so CONFIG_RTL8723BS=y is impossible — Kconfig silently turns
+# it back into =m (or off). Verified in the 6.12 tree. This is exactly the kind
+# of assumption that produces a kernel which builds fine and has no Wi-Fi.
+CONFIG_RTL8723BS=m
+# Its dependencies, which a defconfig does not enable:
+#   RTL8723BS depends on WLAN && MMC && CFG80211
+CONFIG_WLAN=y
+CONFIG_CFG80211=m
+CONFIG_CFG80211_DEFAULT_PS=n
+CONFIG_RFKILL=y
 CONFIG_BT=y
 CONFIG_BT_HCIUART=y
 
