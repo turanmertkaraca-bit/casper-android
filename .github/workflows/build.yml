@@ -138,6 +138,11 @@ jobs:
           # expects distro signing keys that do not exist here. Disable module
           # signing explicitly rather than relying on the runner's toolchain.
           ./scripts/config --disable MODULE_SIG --disable DEBUG_INFO
+          # The ubuntu-latest runner ships a GCC new enough that 6.12's ACPI
+          # tables trip -Werror=unterminated-string-initialization, which is a
+          # toolchain/upstream mismatch, not a config problem in this repo.
+          # Relax only Werror; real errors still fail the build.
+          ./scripts/config --disable WERROR
           make ARCH=x86_64 olddefconfig
           make ARCH=x86_64 -j"$(nproc)" bzImage modules
           file arch/x86/boot/bzImage | tee /tmp/kernel-file.txt
