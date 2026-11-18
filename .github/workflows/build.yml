@@ -73,7 +73,16 @@ jobs:
           sudo apt-get update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
             build-essential bc bison flex libssl-dev libelf-dev xz-utils \
-            dwarves cpio python3 rsync
+            dwarves cpio python3 rsync gcc-13 gcc-multilib
+          # The runner's default GCC is 15+, which defaults to C23. In C23
+          # `bool`, `true` and `false` are keywords, and Linux 6.12's freestanding
+          # EFI stub (which CONFIG_EFI_MIXED requires) defines them as enum
+          # constants and a typedef — so it fails with
+          #   "cannot use keyword 'false' as enumeration constant".
+          # That stub is mandatory here: without it IA32 firmware cannot enter
+          # this kernel at all. Pin to GCC 13 (defaults to gnu17) rather than
+          # patching upstream headers, which would be a maintenance trap.
+          gcc-13 --version | head -1
 
       - name: Fetch kernel source
         run: |
@@ -144,7 +153,9 @@ jobs:
           # Relax only Werror; real errors still fail the build.
           ./scripts/config --disable WERROR
           make ARCH=x86_64 olddefconfig
-          make ARCH=x86_64 -j"$(nproc)" bzImage modules
+          # Build with GCC 13: see the deps step for why the default GCC 15
+          # cannot compile the EFI stub that EFI_MIXED depends on.
+          make ARCH=x86_64 -j"$(nproc)" CC=gcc-13 HOSTCC=gcc-13 bzImage modules
           file arch/x86/boot/bzImage | tee /tmp/kernel-file.txt
           grep -q 'x86-64' /tmp/kernel-file.txt \
             || { echo "::error::bzImage is not 64-bit"; exit 1; }
