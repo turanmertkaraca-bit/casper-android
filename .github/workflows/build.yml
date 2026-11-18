@@ -1,0 +1,134 @@
+name: casper-android
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  shell:
+    name: Desktop shell APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Build the shell APK
+        run: |
+          # aapt2/d8/zipalign/apksigner all come from the SDK; the repo's
+          # build script prefers the native binaries on x86_64 runners.
+          ANDROID_HOME="$ANDROID_SDK_ROOT" ./shell/build.sh
+
+      - name: Verify the APK is a valid HOME activity
+        run: |
+          set -e
+          APK=shell/build/casper-desktop.apk
+          test -f "$APK"
+          # A desktop shell must declare CATEGORY_HOME, or it can never replace
+          # the launcher and the whole project premise fails on device.
+          BT=$(ls -d "$ANDROID_SDK_ROOT"/build-tools/* | sort -V | tail -1)
+          "$BT/aapt2" dump xmltree "$APK" --file AndroidManifest.xml \
+            | grep -q 'android.intent.category.HOME' \
+            || { echo "::error::APK does not declare CATEGORY_HOME"; exit 1; }
+          "$BT/apksigner" verify "$APK"
+          echo "APK OK: $(stat -c %s "$APK") bytes"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: casper-desktop-apk
+          path: shell/build/casper-desktop.apk
+
+  kernel-config:
+    name: Kernel config (symbols resolve in 6.12)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            build-essential bc bison flex libssl-dev libelf-dev xz-utils \
+            dwarves cpio python3 rsync
+
+      - name: Fetch kernel source
+        run: |
+          set -e
+          KVER=6.12
+          SERIES=6
+          curl -fL --retry 3 -o "linux-$KVER.tar.xz" \
+            "https://cdn.kernel.org/pub/linux/kernel/v$SERIES.x/linux-$KVER.tar.xz"
+          tar -xf "linux-$KVER.tar.xz"
+          echo "KVER=$KVER" >> "$GITHUB_ENV"
+
+      - name: Merge config fragment and resolve
+        run: |
+          set -e
+          cd "linux-$KVER"
+          make ARCH=x86_64 defconfig
+          ../kernel/merge-config.sh .config ../kernel/casper-android.fragment > .config.merged
+          mv .config.merged .config
+          # olddefconfig is the real test: it resolves dependencies and will
+          # drop any symbol whose deps cannot be met. A fragment that "looks
+          # fine" but silently loses binder fails here, not on the tablet.
+          make ARCH=x86_64 olddefconfig
+
+      - name: Assert every required symbol survived resolution
+        run: |
+          set -e
+          cd "linux-$KVER"
+          FAIL=0
+          req() {
+            if grep -qE "^$2=" .config; then
+              echo "OK   $2=$3"
+            else
+              echo "::error::$2 did not resolve (wanted $3)"
+              FAIL=1
+            fi
+          }
+          # These are the ones whose silent absence makes the device unbootable
+          # or silent, and whose absence is hard to attribute after the fact.
+          grep -qE '^CONFIG_ANDROID_BINDER_IPC=y$' .config || { echo "::error::binder missing"; FAIL=1; }
+          grep -qE '^CONFIG_ANDROID_BINDERFS=y$' .config   || { echo "::error::binderfs missing"; FAIL=1; }
+          grep -qE '^CONFIG_PSI=y$' .config                || { echo "::error::PSI missing (lmkd degrades)"; FAIL=1; }
+          grep -qE '^CONFIG_EFI_MIXED=y$' .config          || { echo "::error::EFI_MIXED missing (32-bit UEFI cannot boot this kernel)"; FAIL=1; }
+          grep -qE '^CONFIG_ZRAM=y$' .config               || { echo "::error::zram missing"; FAIL=1; }
+          grep -qE '^CONFIG_SECURITY_SELINUX=y$' .config   || { echo "::error::SELinux missing"; FAIL=1; }
+          grep -qE '^CONFIG_SND_SOC_INTEL_BYTCR_RT5640_MACH=y$' .config \
+            || { echo "::error::RT5640 audio machine driver missing (no sound on this tablet)"; FAIL=1; }
+          grep -qE '^CONFIG_RTL8723BS=y$' .config          || { echo "::error::RTL8723BS Wi-Fi missing"; FAIL=1; }
+          grep -qE '^CONFIG_DRM_I915=y$' .config           || { echo "::error::i915 missing"; FAIL=1; }
+          exit $FAIL
+
+      - name: Build bzImage
+        run: |
+          set -e
+          cd "linux-$KVER"
+          make ARCH=x86_64 -j"$(nproc)" bzImage
+          file arch/x86/boot/bzImage | tee /tmp/kernel-file.txt
+          grep -q 'x86-64' /tmp/kernel-file.txt \
+            || { echo "::error::bzImage is not 64-bit"; exit 1; }
+          # Mixed mode is what lets IA32 firmware enter this kernel. Confirm the
+          # thunk is actually present in the built image, not just in .config.
+          if command -v nm >/dev/null && [ -f vmlinux ]; then
+            nm vmlinux | grep -qi 'efi_mixed' \
+              && echo "efi_mixed thunk present" \
+              || echo "::warning::efi_mixed symbol not found in vmlinux"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: casper-android-kernel
+          path: |
+            linux-6.12/arch/x86/boot/bzImage
+            linux-6.12/.config

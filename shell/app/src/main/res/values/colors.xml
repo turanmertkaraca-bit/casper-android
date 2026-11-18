@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Casper Desktop palette: flat, high contrast, no gradients and no blur.
+         Every choice here is a performance decision as much as an aesthetic
+         one — see docs/optimizations.md §2. On a 4-EU Gen7 GPU a full-screen
+         blur or a soft shadow costs tens of milliseconds per frame, which
+         reads as "broken" rather than "premium". Flat surfaces composite as
+         opaque quads and cost almost nothing. -->
+    <color name="desktop_bg">#10131A</color>
+    <color name="panel_bg">#1A1F2B</color>
+    <color name="panel_border">#2A3244</color>
+    <color name="window_bg">#161B24</color>
+    <color name="window_title">#222A38</color>
+    <color name="accent">#4C8DFF</color>
+    <color name="text">#E8ECF4</color>
+    <color name="text_dim">#9AA6BC</color>
+    <color name="danger">#FF5F57</color>
+</resources>

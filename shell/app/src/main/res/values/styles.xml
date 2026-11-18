@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="DesktopTheme" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/desktop_bg</item>
+        <item name="android:statusBarColor">@color/panel_bg</item>
+        <item name="android:navigationBarColor">@color/panel_bg</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowIsTranslucent">false</item>
+        <!-- Animations off at the theme level as well as via Settings: on this
+             GPU the system transition is the single most visible stutter. -->
+        <item name="android:windowAnimationStyle">@null</item>
+    </style>
+</resources>

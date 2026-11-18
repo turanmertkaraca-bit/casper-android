@@ -1,0 +1,21 @@
+# build outputs
+shell/build/
+kernel/out/
+*.apk
+*.img
+*.xz
+*.deb
+
+# keystore: a debug key is generated on first build. It must never be committed
+# — a shared signing key would let anyone publish an update to the same package
+# name on a device that installs this.
+shell/keystore.jks
+*.jks
+*.keystore
+
+# tool wrappers are copies of the ones in android-app/tools
+shell/tools/
+
+# editor / OS
+.DS_Store
+*.swp

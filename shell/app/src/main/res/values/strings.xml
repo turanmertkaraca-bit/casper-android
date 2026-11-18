@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Casper Desktop</string>
+    <string name="show_all_apps">All applications</string>
+    <string name="close">Close</string>
+</resources>
