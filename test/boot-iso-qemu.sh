@@ -181,34 +181,68 @@ trap cleanup EXIT
 # the kernel finishes, so a single late screenshot can miss the whole boot.
 shot() { printf 'screendump %s\n' "$1" | timeout 10 socat - "UNIX-CONNECT:$MON" >/dev/null 2>&1 || true; }
 
+# Send a key sequence through the QEMU monitor.
+# Needed because Android-x86's GRUB does not auto-boot: it waits at its menu,
+# and its own config never puts console=ttyS0 on the kernel cmdline. Pressing
+# Enter selects the default entry, which is the difference between "the loader
+# rendered a menu" and "the kernel actually started".
+key() {
+printf '%s\n' "$1" | timeout 10 socat - "UNIX-CONNECT:$MON" >/dev/null 2>&1 || true
+}
+
 # socat may not exist; fall back to a tiny python monitor client.
-shot_py() {
+mon_cmd() {
 python3 - "$MON" "$1" <<'PY' 2>/dev/null || true
 import socket, sys, time
-sock, path = sys.argv[1], sys.argv[2]
+sock, cmd = sys.argv[1], sys.argv[2]
 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 s.settimeout(10)
 s.connect(sock)
 time.sleep(0.3)
 try: s.recv(65536)
 except Exception: pass
-s.sendall(("screendump %s\n" % path).encode())
+s.sendall((cmd + "\n").encode())
 time.sleep(1.0)
 try: s.recv(65536)
 except Exception: pass
 s.close()
 PY
 }
-HAVE_SOCAT=0; command -v socat >/dev/null 2>&1 && HAVE_SOCAT=1
 
-for t in 20 45 70 "$WAIT"; do
-    elapsed=0
-    while [ "$elapsed" -lt "$t" ]; do
+shot_py() { mon_cmd "screendump $1"; }
+key_py()  { mon_cmd "sendkey $1"; }
+
+HAVE_SOCAT=0; command -v socat >/dev/null 2>&1 && HAVE_SOCAT=1
+if [ "$HAVE_SOCAT" = 1 ]; then
+    do_shot() { shot "$1"; }
+    do_key()  { key  "$1"; }
+else
+    do_shot() { shot_py "$1"; }
+    do_key()  { key_py  "$1"; }
+fi
+
+# Phase 1: let firmware POST and GRUB render its menu.
+sleep 20
+do_shot "$OUT/boot-20s.ppm"; info "captured boot-20s.ppm (firmware + loader)"
+
+# Phase 2: select the default GRUB entry. GRUB's menu appears by ~20 s; Enter
+# starts the highlighted entry. Sent twice with a gap because the first may
+# land before the menu is listening.
+sleep 6
+do_key "ret"; sleep 3; do_key "ret"
+info "sent Enter to start the default boot entry"
+
+# Phase 3: sample the kernel/Android bring-up. These frames are what
+# distinguishes "GRUB menu only" from "Android actually booting".
+for t in 45 75 120 "$WAIT"; do
+    target=$t
+    cur=0
+    while [ "$cur" -lt "$target" ]; do
         kill -0 "$QPID" 2>/dev/null || break
-        sleep 5; elapsed=$((elapsed + 5))
+        sleep 5; cur=$((cur + 5))
     done
     kill -0 "$QPID" 2>/dev/null || { info "qemu exited before ${t}s"; break; }
-    if [ "$HAVE_SOCAT" = 1 ]; then shot "$OUT/boot-${t}s.ppm"; else shot_py "$OUT/boot-${t}s.ppm"; fi
+    do_shot "$OUT/boot-${t}s.ppm"
     [ -s "$OUT/boot-${t}s.ppm" ] && info "captured boot-${t}s.ppm"
 done
 
@@ -219,55 +253,102 @@ cleanup
 info "analysing captured frames"
 RESULT=$(python3 - "$OUT" <<'PY'
 import sys, os, glob
+from collections import Counter
+
 outdir = sys.argv[1]
-best = None
+
+def load_ppm(p):
+    data = open(p, 'rb').read()
+    if not data.startswith(b'P6'):
+        return None
+    fields, i = [], 2
+    while len(fields) < 3:
+        while i < len(data) and data[i:i+1].isspace():
+            i += 1
+        if data[i:i+1] == b'#':
+            while i < len(data) and data[i:i+1] not in (b'\n', b''):
+                i += 1
+            continue
+        j = i
+        while j < len(data) and not data[j:j+1].isspace():
+            j += 1
+        fields.append(int(data[i:j]))
+        i = j
+    i += 1
+    return fields[0], fields[1], data[i:]
+
+# Classify a frame so the result says WHICH stage it is, not merely "not blank".
+# This matters: a GRUB menu proves the loader ran, but only kernel/Android
+# output proves the handoff into Android succeeded. Conflating them would let a
+# menu screenshot be reported as a successful Android boot.
+def classify(w, h, px):
+    n = min(len(px) // 3, w * h)
+    if n == 0:
+        return dict(nonblack=0.0, colors=0, kind='empty', dark=0.0)
+    step = max(1, n // 60000)
+    colors = Counter()
+    nonblack = 0
+    counted = 0
+    lum_sum = 0
+    for k in range(0, n, step):
+        r, g, b = px[k*3], px[k*3+1], px[k*3+2]
+        counted += 1
+        lum_sum += (r + g + b) // 3
+        if r or g or b:
+            nonblack += 1
+        if len(colors) < 8000:
+            colors[(r >> 3, g >> 3, b >> 3)] += 1
+    tot = counted or 1
+    frac_nonblack = nonblack / tot
+    avg_lum = lum_sum / tot
+    # GRUB's theme is a distinctive blue field with a light title bar.
+    blueish = sum(v for (r, g, b), v in colors.items() if b > r + 6 and b > 8) / tot
+    dark = sum(v for (r, g, b), v in colors.items() if (r + g + b) < 12) / tot
+    ncol = len(colors)
+
+    if frac_nonblack < 0.01:
+        kind = 'blank'
+    elif blueish > 0.15 and ncol > 40:
+        kind = 'grub-menu'           # Android-x86 GRUB theme (blue)
+    elif dark > 0.85 and ncol < 60:
+        kind = 'text-on-black'       # kernel console / init messages
+    elif ncol >= 200 and avg_lum > 30:
+        kind = 'rich-ui'             # Android boot animation or UI
+    elif dark > 0.85:
+        kind = 'text-on-black'
+    else:
+        kind = 'early-firmware'
+    return dict(nonblack=frac_nonblack, colors=ncol, kind=kind, dark=dark)
+
+frames = []
 for p in sorted(glob.glob(os.path.join(outdir, 'boot-*.ppm'))):
     try:
-        data = open(p, 'rb').read()
-        if not data.startswith(b'P6'):
+        r = load_ppm(p)
+        if not r:
             continue
-        # P6 <w> <h> <maxval>\n<binary>
-        fields = []
-        i = 2
-        while len(fields) < 3:
-            while i < len(data) and data[i:i+1].isspace():
-                i += 1
-            if data[i:i+1] == b'#':
-                while data[i:i+1] not in (b'\n', b''):
-                    i += 1
-                continue
-            j = i
-            while j < len(data) and not data[j:j+1].isspace():
-                j += 1
-            fields.append(int(data[i:j]))
-            i = j
-        i += 1
-        w, h, _ = fields
-        px = data[i:]
-        n = min(len(px) // 3, w * h)
-        # Count pixels that are not pure black and distinct colours. A blank
-        # framebuffer is all-black; firmware/GRUB/kernel always draw something.
-        nonblack = 0; colors = set()
-        step = max(1, n // 40000)
-        counted = 0
-        for k in range(0, n, step):
-            r, g, b = px[k*3], px[k*3+1], px[k*3+2]
-            counted += 1
-            if r or g or b:
-                nonblack += 1
-            if len(colors) < 4000:
-                colors.add((r, g, b))
-        frac = nonblack / counted if counted else 0
-        if best is None or frac > best[1]:
-            best = (os.path.basename(p), frac, len(colors), w, h)
+        w, h, px = r
+        c = classify(w, h, px)
+        c['name'] = os.path.basename(p)
+        c['size'] = '%dx%d' % (w, h)
+        frames.append(c)
     except Exception as e:
-        print("could not parse", p, e, file=sys.stderr)
+        print("could not parse %s: %s" % (p, e), file=sys.stderr)
 
-if best is None:
-    print("NONE")
-else:
-    name, frac, ncol, w, h = best
-    print("BEST %s nonblack=%.3f colors=%d size=%dx%d" % (name, frac, ncol, w, h))
+if not frames:
+    print("NO FRAMES")
+    sys.exit(0)
+
+for f in frames:
+    print("FRAME %-14s %-9s kind=%-14s nonblack=%.3f colours=%d"
+          % (f['name'], f['size'], f['kind'], f['nonblack'], f['colors']))
+
+# Best (most informative) frame decides.
+priority = ['rich-ui', 'text-on-black', 'grub-menu', 'early-firmware', 'blank']
+kinds = {f['kind'] for f in frames}
+best_kind = next((k for k in priority if k in kinds), 'blank')
+best = next(f for f in frames if f['kind'] == best_kind)
+print("BEST %s %s kind=%s nonblack=%.3f colors=%d"
+      % (best['name'], best['size'], best['kind'], best['nonblack'], best['colors']))
 PY
 )
 echo "$RESULT"
@@ -305,23 +386,44 @@ A secboot IA32 image needs '-machine q35,smm=on' (the harness enables this
 automatically when it detects a secboot image)." 1
 fi
 
-# Evidence thresholds, deliberately conservative:
-#   >1% non-black pixels  -> something rendered (firmware/GRUB/kernel)
-#   >20 distinct colours  -> real UI/text, not a single-colour fill or glitch
-if awk "BEGIN{exit !($FRAC > 0.01)}"; then
-    ok "framebuffer is not blank (${FRAC} non-black)"
-    if [ "${NCOL:-0}" -gt 20 ]; then
-        ok "text/UI content present (${NCOL} distinct colours)"
-        echo
-        echo "RESULT: 32-bit UEFI firmware executed a loader and rendered a UI."
-        echo "        This is the evidence that the IA32 -> Android handoff works."
-        exit 0
-    fi
-    echo "RESULT: firmware rendered, but content is nearly monochrome"
-    echo "        (${NCOL} colours). Likely an early frame; treat as inconclusive."
-    exit 0
-fi
+# Stage-aware verdict. The stages are not equivalent:
+#   early-firmware  -> firmware executed, nothing else proven
+#   grub-menu       -> the 32-bit EFI loader ran and rendered (real progress)
+#   text-on-black   -> kernel console / init: the handoff into Android started
+#   rich-ui         -> Android userspace is drawing
+# Reporting a GRUB menu as "Android booted" would be wrong, so the exit code
+# and the wording distinguish them.
+KIND=$(echo "$RESULT" | sed -n 's/.*BEST .* kind=\([a-z-]*\).*/\1/p')
 
-die "framebuffer is essentially blank (${FRAC} non-black) after ${WAIT}s.
+case "$KIND" in
+    rich-ui)
+        ok "Android userspace appears to be drawing (kind=rich-ui)"
+        echo
+        echo "RESULT: 32-bit UEFI -> loader -> kernel -> Android UI."
+        echo "        Strongest evidence obtained: Android is running under IA32 firmware."
+        exit 0 ;;
+    text-on-black)
+        ok "kernel/init console output is being drawn (kind=text-on-black)"
+        echo
+        echo "RESULT: the 32-bit UEFI handoff into the Android kernel WORKS."
+        echo "        Kernel boot messages are on screen. Full userspace (UI) was not"
+        echo "        reached within ${WAIT}s, which is normal for Android-x86 in QEMU"
+        echo "        without hardware acceleration."
+        exit 0 ;;
+    grub-menu)
+        ok "the 32-bit EFI loader ran and rendered its menu (kind=grub-menu)"
+        echo
+        echo "RESULT: firmware -> 32-bit EFI loader confirmed."
+        echo "        The kernel was selected but did not draw within ${WAIT}s."
+        echo "        This proves the loader half of the chain; it does NOT prove"
+        echo "        Android booted. Increase --wait or check serial.log."
+        exit 3 ;;
+    early-firmware)
+        ok "firmware rendered something (kind=early-firmware)"
+        echo "RESULT: firmware executed but no loader/kernel UI was seen. Inconclusive."
+        exit 3 ;;
+    *)
+        die "framebuffer is essentially blank after ${WAIT}s.
 The IA32 firmware did not render anything. Check qemu.log for a firmware
-panic. This is the failure mode that would black-screen on the tablet." 1
+panic. This is the failure mode that would black-screen on the tablet." 1 ;;
+esac
