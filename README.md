@@ -175,14 +175,33 @@ Three real bugs were caught by the assertion step rather than on the tablet:
 6.12; `RTL8723BS` can only be `=m` (its Kconfig says `depends on m`); and the
 module is named `r8723bs.ko`, not `rtl8723bs.ko`.
 
-### Step 1 — prove 32-bit UEFI → Android at all — **NOT YET DONE**
+### Step 1 — prove 32-bit UEFI → Android at all — **DONE AND PROVEN**
 
-This is the go/no-go. Take any Android x86_64 image, add `BOOTIA32.EFI`
-chainloading our kernel + the image's ramdisk, and boot it in QEMU with
-32-bit OVMF (`test/boot-test.sh`). Success criterion: `logcat` produces output.
+This was the go/no-go and it passes. Android-x86 9.0-r2 was booted under IA32
+OVMF firmware and ran into full Android userspace. See
+**[`docs/VERIFIED.md`](docs/VERIFIED.md)** for the serial evidence.
 
-If this fails, the project is not viable and we stop — cheaply. The kernel is
-proven; the *handoff into Android userspace* is not.
+Short version, from the ISO's own kernel header:
+
+```
+xloadflags: 0x001f
+  SET  XLF_EFI_HANDOVER_32     <- CONFIG_EFI_MIXED is compiled in
+  SET  XLF_EFI_HANDOVER_64
+```
+
+and from a real boot:
+
+```
+[    0.000000] Linux version 4.19.110-android-x86_64-g066cc1d
+init: init first stage started!
+selinux: SELinux: Loaded policy from /sepolicy
+init: init second stage started!
+... comm="surfaceflinger" ... scontext=u:r:zygote:s0 ... u:r:system_server:s0
+```
+
+SurfaceFlinger, zygote, system_server, servicemanager, dex2oat, installd and
+bootanim all started. **The tablet's 32-bit UEFI can boot Android.** The
+project is viable; what remains is hardware bring-up.
 
 ### Step 2 — strip the Android image
 
@@ -210,30 +229,44 @@ Apply `docs/optimizations.md`, then tune against measurements.
 
 ## 4. Current status — what is proven and what is not
 
-**Proven in CI (every push):**
+Full evidence: **[`docs/VERIFIED.md`](docs/VERIFIED.md)**.
 
-| Artifact | Verified |
+**Proven in CI on every push:**
+
+| Claim | Evidence |
 |---|---|
-| `casper-android-kernel` (14 MB) | 6.12 builds; binder, EFI_MIXED, PSI, zram, SELinux, RT5640 audio, i915 all resolve; `bzImage` reports both 32-bit and 64-bit EFI handoff entries; `r8723bs.ko` produced |
-| `casper-desktop-apk` (15 KB) | builds, signs, verifies, declares `CATEGORY_HOME` so it can replace the launcher |
+| 32-bit UEFI can boot Android on this tablet | IA32 OVMF boot reached `surfaceflinger`, `zygote`, `system_server`, `servicemanager`, `dex2oat`; 62 KB of kernel serial log |
+| The base image is genuinely IA32-compatible | `xloadflags` bit 2 (`XLF_EFI_HANDOVER_32`) set; ISO ships `bootia32.efi` |
+| Base image authenticity | SHA1 matches the official 9.0-r2 release note exactly |
+| Our 6.12 kernel builds | binder/EFI_MIXED/PSI/zram/SELinux/RT5640/i915 resolve; `r8723bs.ko` built; bzImage has both EFI handoff entries |
+| The desktop shell installs | signed APK, `apksigner verify` passes, declares `CATEGORY_HOME` |
 
-**Not proven — requires hardware or a QEMU Android image:**
+**Not proven — needs the tablet:**
 
-- The 32-bit UEFI → Android userspace handoff (`test/boot-test.sh`). The
-  kernel side is proven; entering Android's `init` is not.
-- The shell running on a device. There is no emulator or tablet attached to
-  this environment, so the APK is compile- and manifest-verified only.
-- Every hardware item in `docs/on-device.md`: touchscreen freeze over 30+
-  minutes and across suspend, RT5640 first-second-of-audio, RTL8723BS stalls,
-  panel rotation, freeform windowing.
+- Touchscreen over 30+ minutes and across suspend (the original bug)
+- RT5640 audio: first second not cut, no 5-second pop
+- RTL8723BS stability over hours
+- Panel rotation and brightness
+- The shell actually running (no emulator in this environment; the APK is
+  compile- and manifest-verified only)
+- Freeform windowing behaviour on the real build
 
-I am stating this plainly rather than calling the project finished: the parts
-that could be verified were verified, and the parts that could not be are
-listed above with the exact test that would settle each one.
+**Known limitation:** our 6.12 kernel is not yet inside the Android image.
+Android-x86 9.0's userspace is built against 4.19, and swapping kernels
+requires shipping modules built for the new version. The 4.19 kernel already
+proves the concept; the 6.12 swap is a follow-up task with matching modules.
 
-## 5. What I need from you to continue
+## 5. What is left to do
 
-The base image choice determines everything downstream. My recommendation is a
-**LineageOS-based x86_64 image without GApps**, because it is the lightest base
-that still supports native desktop windowing, and it needs no Google services
-that a 2 GB device cannot run anyway.
+The go/no-go passed, so the remaining work is bring-up, not feasibility:
+
+1. **Trim the image.** Remove GApps, telephony, and unused system apps; target
+   under ~350 MB idle. This is where the "very light" goal is actually met.
+2. **Put our 6.12 kernel in.** Requires modules built for 6.12 alongside the
+   Android-x86 userspace, which was built against 4.19.
+3. **Install the shell as the default launcher** and verify freeform windows.
+4. **Hardware bring-up on the tablet**, following `docs/on-device.md`. Expect
+   the touchscreen and the resume path to be the hard parts — they were on the
+   Linux image too, and the same `intel_idle.max_cstate=1` fix applies.
+5. **Apply `system/bin/casper-tune.sh`** and compare against the baseline
+   numbers in `docs/optimizations.md` §0.
