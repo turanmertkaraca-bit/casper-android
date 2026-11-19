@@ -72,14 +72,42 @@ rm -rf "$WORK/system"
 unsquashfs -d "$WORK/system" -f "$SFS" >"$WORK/unsquash.log" 2>&1 \
     || die "unsquashfs failed (see $WORK/unsquash.log)"
 
-SYS="$WORK/system/system"
-if [ -d "$SYS" ]; then
-    ROOT_CONTENT="$SYS"
+# Android-x86 mounts system.sfs as a loop device and then loop-mounts a
+# *filesystem image* inside it (init: "mount -o loop /sfs/system.img system").
+# So system.sfs contains system.img, not a directory tree. Stripping must
+# therefore operate on that image, not on the squashfs extraction — this is
+# what made the first version of this script strip nothing at all.
+SFSROOT="$WORK/system"
+IMG=""
+for cand in "$SFSROOT/system.img" "$SFSROOT/system/system.img"; do
+    [ -f "$cand" ] && { IMG="$cand"; break; }
+done
+if [ -z "$IMG" ]; then
+    # Fall back to a plain directory tree (some builds do ship one).
+    if [ -d "$SFSROOT/system" ]; then
+        ROOT_CONTENT="$SFSROOT/system"
+        MODE=tree
+    else
+        ROOT_CONTENT="$SFSROOT"
+        MODE=tree
+    fi
+    ok "squashfs contains a directory tree ($MODE): $(du -sh "$ROOT_CONTENT" | cut -f1)"
 else
-    # Some builds put the tree directly at the squashfs root.
-    ROOT_CONTENT="$WORK/system"
+    MODE=img
+    info "system.sfs contains $(basename "$IMG") ($(du -h "$IMG" | cut -f1))"
+    mkdir -p "$WORK/sys"
+    # Loop-mount may not be permitted in some containers; fall back to
+    # debugfs-free extraction via a plain mount and fail clearly if impossible.
+    if sudo -n true 2>/dev/null || [ "$(id -u)" = 0 ]; then
+        mount -o loop,noatime "$IMG" "$WORK/sys" \
+            || die "could not loop-mount $IMG (needs root or CAP_SYS_ADMIN)"
+        ROOT_CONTENT="$WORK/sys"
+        ok "mounted system.img: $(du -sh "$ROOT_CONTENT" 2>/dev/null | cut -f1)"
+    else
+        die "need root to loop-mount system.img for stripping.
+Re-run with sudo, or use --no-strip."
+    fi
 fi
-ok "system tree: $(du -sh "$ROOT_CONTENT" | cut -f1)"
 
 # ── 2. work out which variant this is ─────────────────────────────────────
 is_gapps=0
@@ -160,11 +188,15 @@ ok "system/bin/casper-tune.sh installed"
 
 # ── 5. repack ─────────────────────────────────────────────────────────────
 info "repacking system.sfs"
-if [ -d "$SYS" ]; then
-    ( cd "$WORK/system" && mksquashfs system "$SFS.new" -noappend -comp gzip -b 131072 \
+if [ "$MODE" = img ]; then
+    # Unmount so all writes are flushed back into system.img.
+    sync
+    umount "$WORK/sys" || die "could not unmount $WORK/sys (writes may be lost)"
+    ok "system.img now $(du -h "$IMG" | cut -f1)"
+    ( cd "$SFSROOT" && mksquashfs . "$SFS.new" -noappend -comp gzip -b 131072 \
         >"$WORK/mksquash.log" 2>&1 )
 else
-    ( cd "$WORK/system" && mksquashfs . "$SFS.new" -noappend -comp gzip -b 131072 \
+    ( cd "$ROOT_CONTENT" && mksquashfs . "$SFS.new" -noappend -comp gzip -b 131072 \
         >"$WORK/mksquash.log" 2>&1 )
 fi
 [ -f "$SFS.new" ] || die "mksquashfs failed (see $WORK/mksquash.log)"
@@ -184,18 +216,31 @@ fi
 
 info "rebuilding ISO"
 mkdir -p "$(dirname "$OUT")" 2>/dev/null || true
-xorriso -as mkisofs \
-    -o "$OUT" \
-    -isohybrid-mbr /usr/lib/ISOLINUX/isohdpfx.bin \
-    -c isolinux/boot.cat \
-    -b isolinux/isolinux.bin \
-    -no-emul-boot -boot-load-size 4 -boot-info-table \
-    -eltorito-alt-boot \
-    -e boot/grub/efi.img \
-    -no-emul-boot -isohybrid-gpt-basdat \
-    -V "CasperOS-Android" \
-    "$WORK/iso" >"$WORK/xorriso.log" 2>&1 \
+# IMPORTANT: build with the SAME root that was extracted, and keep the boot
+# records from the original image. An earlier version pointed xorriso at a
+# staging tree and passed a hand-written -b/-e set, which dropped /kernel from
+# the resulting ISO and produced an image that could not boot at all
+# ("no kernel found in ISO"). The safe recipe is:
+#   - use the extracted tree as the ISO root
+#   - copy the original El Torito boot record (-boot_image any keep) so the
+#     MBR/GPT and EFI partition layout stay byte-compatible with what the
+#     firmware expects
+#   - reuse the original volume ID so anything that keys off it still matches
+xorriso -indev "$ISO" \
+    -outdev "$OUT" \
+    -map "$WORK/iso" / \
+    -boot_image any keep \
+    -volid "CasperOS-Android" \
+    -overwrite on >"$WORK/xorriso.log" 2>&1 \
     || die "xorriso failed to build the ISO (see $WORK/xorriso.log)"
+
+# Hard verification: the result MUST still contain the kernel and the EFI
+# loaders, or it is not bootable and must not be shipped.
+for f in kernel initrd.img boot/grub/efi.img efi/boot/bootia32.efi; do
+    xorriso -indev "$OUT" -find "/$f" -exec lsdl >/dev/null 2>&1 \
+        || die "rebuilt ISO is missing /$f — it would not boot"
+done
+ok "rebuilt ISO contains kernel, initrd and both EFI loaders"
 
 ok "ISO: $OUT ($(du -h "$OUT" | cut -f1))"
 

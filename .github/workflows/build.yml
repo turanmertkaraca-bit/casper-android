@@ -89,7 +89,9 @@ jobs:
 
       - name: Build the trimmed image
         run: |
-          ./image/build-image.sh --iso ax86.iso --out casper-android.iso \
+          # Stripping happens inside system.img, which must be loop-mounted,
+          # so this needs root.
+          sudo ./image/build-image.sh --iso ax86.iso --out casper-android.iso \
             --work /tmp/imgwork
 
       - name: Verify the result is still 32-bit-UEFI bootable
