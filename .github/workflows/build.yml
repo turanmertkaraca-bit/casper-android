@@ -157,8 +157,18 @@ jobs:
           # cannot compile the EFI stub that EFI_MIXED depends on.
           make ARCH=x86_64 -j"$(nproc)" CC=gcc-13 HOSTCC=gcc-13 bzImage modules
           file arch/x86/boot/bzImage | tee /tmp/kernel-file.txt
-          grep -q 'x86-64' /tmp/kernel-file.txt \
-            || { echo "::error::bzImage is not 64-bit"; exit 1; }
+          # bzImage is a boot executable, not an ELF, so `file` never says
+          # "x86-64". Assert the properties that actually matter instead:
+          #   - "64-bit EFI handoff entry point"  -> a 64-bit kernel
+          #   - "32-bit EFI handoff entry point"  -> EFI_MIXED is compiled in,
+          #     which is the ONLY way IA32 firmware can enter this kernel.
+          # Earlier versions of this check grepped for "x86-64" and failed a
+          # perfectly good kernel build.
+          grep -q '64-bit EFI handoff entry point' /tmp/kernel-file.txt \
+            || { echo "::error::bzImage has no 64-bit EFI handoff entry point"; exit 1; }
+          grep -q '32-bit EFI handoff entry point' /tmp/kernel-file.txt \
+            || { echo "::error::bzImage has no 32-bit EFI handoff entry — EFI_MIXED is not active, IA32 firmware cannot boot it"; exit 1; }
+          echo "bzImage OK: 64-bit kernel with 32-bit EFI handoff (mixed mode)"
           # The Wi-Fi driver must exist as a module, since =y is impossible.
           find . -name 'rtl8723bs.ko*' | head -3
           find . -name 'rtl8723bs.ko*' | grep -q . \
