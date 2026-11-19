@@ -170,9 +170,13 @@ jobs:
             || { echo "::error::bzImage has no 32-bit EFI handoff entry — EFI_MIXED is not active, IA32 firmware cannot boot it"; exit 1; }
           echo "bzImage OK: 64-bit kernel with 32-bit EFI handoff (mixed mode)"
           # The Wi-Fi driver must exist as a module, since =y is impossible.
-          find . -name 'rtl8723bs.ko*' | head -3
-          find . -name 'rtl8723bs.ko*' | grep -q . \
-            || { echo "::error::rtl8723bs.ko was not built"; exit 1; }
+          # Its output file is r8723bs.ko — NOT rtl8723bs.ko. The Kconfig symbol
+          # is RTL8723BS but the Makefile names the module r8723bs, and guessing
+          # the filename from the symbol is how this check failed twice.
+          find . -path '*rtl8723bs/r8723bs.ko' | head -3
+          find . -path '*rtl8723bs/r8723bs.ko' | grep -q . \
+            || { echo "::error::r8723bs.ko was not built (RTL8723BS Wi-Fi driver)"; exit 1; }
+          ls -la "$(find . -path '*rtl8723bs/r8723bs.ko' | head -1)"
           # Mixed mode is what lets IA32 firmware enter this kernel. Confirm the
           # thunk is actually present in the built image, not just in .config.
           if command -v nm >/dev/null && [ -f vmlinux ]; then
@@ -187,4 +191,4 @@ jobs:
           path: |
             linux-6.12/arch/x86/boot/bzImage
             linux-6.12/.config
-            linux-6.12/**/rtl8723bs.ko*
+            linux-6.12/**/r8723bs.ko
