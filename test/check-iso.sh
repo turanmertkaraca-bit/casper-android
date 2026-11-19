@@ -82,13 +82,25 @@ def joliet_root():
                 return find_root(vd)
     return None
 
+def normalise(name):
+    """Normalise an ISO9660/Joliet name for comparison.
+
+    Three quirks matter here, all seen in real images:
+      - Joliet stores UTF-16BE, so NUL bytes appear in the raw name
+      - a version suffix ";1" is appended by some writers
+      - ISO9660 level 1 writes a file with no extension as "NAME." (trailing
+        dot). xorriso's output uses this, which is why a rebuilt ISO showed
+        'KERNEL.' and this script reported "no kernel found".
+    """
+    n = name.replace('\x00', '')
+    n = n.split(';')[0]
+    n = n.rstrip('.')
+    return n.strip().lower()
+
 def try_root(ext, size):
-    """Read a root dir and normalise names (Joliet is UCS-2)."""
     out = []
     for name, e, sz, fl in read_dir(ext, size):
-        # Joliet stores UTF-16BE; strip NULs and any escaped sequences.
-        clean = name.replace('\x00', '')
-        out.append((clean, e, sz, fl))
+        out.append((normalise(name), e, sz, fl))
     return out
 
 candidates = []
@@ -115,7 +127,7 @@ print("using %s tree (%d entries)" % (root_label, len(root)))
 def find_dir(entries, name):
     want = name.lower()
     for n, e, s, fl in entries:
-        if n.lower().split(';')[0] == want and fl & 2:
+        if n == want and fl & 2:
             return e, s
     return None
 
@@ -140,7 +152,7 @@ def find_file_deep(entries, want, depth=2):
     """Find a regular file by name, looking a couple of levels down."""
     want = want.lower()
     for n, e, s, fl in entries:
-        if n.lower().split(';')[0] == want and not (fl & 2):
+        if n == want and not (fl & 2):
             return e, s
     if depth > 0:
         for n, e, s, fl in entries:
