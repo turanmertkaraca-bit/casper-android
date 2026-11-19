@@ -81,16 +81,23 @@ FCODE="$(find_ia32 || true)"
 if [ -z "$FCODE" ]; then
     info "IA32 OVMF not installed; fetching from Debian"
     # Debian's ovmf-ia32 is the only source that reliably ships an IA32 build.
-    # Pin explicit versions and fall through to the live pool listing, so a
-    # removed point release does not silently break the test (which is exactly
-    # how the first version of this check failed).
+    #
+    # Version ORDER MATTERS: 2022.11 and 2020.11 ship only a `.secboot` IA32
+    # image, and that build faults at the reset vector under QEMU's default
+    # q35 (SMM not enabled) — "IA32 Exception 06 (#UD) at EIP 000E0000". That
+    # looks exactly like a broken boot chain but is a firmware/model mismatch.
+    # 2025.02 is the first package that also ships a plain OVMF32_CODE_4M.fd,
+    # so it is tried first.
     mkdir -p "$OUT/ovmf"
     got=""
-    for ver in 2022.11-6+deb12u2 2025.02-8+deb13u1 2020.11-2+deb11u2; do
+    for ver in 2025.02-8+deb13u1 2022.11-6+deb12u2 2020.11-2+deb11u2; do
         url="http://deb.debian.org/debian/pool/main/e/edk2/ovmf-ia32_${ver}_all.deb"
-        if curl -fsSL --max-time 120 -o "$OUT/ovmf-ia32.deb" "$url" 2>/dev/null; then
+        if curl -fsSL --max-time 180 -o "$OUT/ovmf-ia32.deb" "$url" 2>/dev/null; then
+            rm -rf "$OUT/ovmf"; mkdir -p "$OUT/ovmf"
             dpkg-deb -x "$OUT/ovmf-ia32.deb" "$OUT/ovmf" 2>/dev/null || continue
-            got=$(find "$OUT/ovmf" -name 'OVMF32_CODE*' | head -1)
+            # Prefer a non-secboot image explicitly.
+            got=$(find "$OUT/ovmf" -name 'OVMF32_CODE*' ! -name '*secboot*' | head -1)
+            [ -n "$got" ] || got=$(find "$OUT/ovmf" -name 'OVMF32_CODE*' | head -1)
             [ -n "$got" ] && { FCODE="$got"; info "fetched ovmf-ia32 $ver"; break; }
         fi
     done
@@ -99,6 +106,12 @@ Install with: sudo apt install ovmf-ia32
 Without IA32 firmware this test cannot simulate the tablet's 32-bit UEFI." 2
 fi
 info "IA32 firmware: $FCODE"
+case "$FCODE" in
+    *secboot*)
+        info "note: only a secboot IA32 image is available; enabling SMM below"
+        NEED_SMM=1 ;;
+    *)  NEED_SMM=0 ;;
+esac
 
 # Verify it is really 32-bit. A 64-bit OVMF here would make the whole test
 # meaningless, and this mistake is easy to make because the filenames differ
@@ -138,8 +151,19 @@ fi
 info "booting (${MEM} MB, IA32 UEFI, ${WAIT}s)"
 MON="$OUT/mon.sock"
 rm -f "$MON"
+
+# A secboot IA32 image needs SMM (secure boot lives in SMM). Without it the
+# firmware faults at the reset vector with #UD, which is easy to misread as a
+# broken boot chain.
+EXTRA_QEMU=()
+if [ "${NEED_SMM:-0}" = "1" ]; then
+    EXTRA_QEMU=(-machine q35,smm=on -global driver=cfi.pflash01,property=secure,value=on)
+    info "SMM enabled for secboot firmware"
+fi
+
 "$QEMU" \
     -machine q35 -m "$MEM" -cpu max \
+    "${EXTRA_QEMU[@]}" \
     -drive if=pflash,format=raw,readonly=on,file="$FCODE" \
     -drive if=pflash,format=raw,file="$VARS_OUT" \
     -cdrom "$ISO" \
@@ -266,6 +290,19 @@ NCOL=$(echo "$RESULT" | sed -n 's/.*colors=\([0-9]*\).*/\1/p')
 
 if [ -z "$FRAC" ]; then
     die "frame analysis failed (not a parseable PPM)" 1
+fi
+
+# Distinguish a firmware crash from a genuine no-boot. These look identical in
+# a screenshot (black), but they mean opposite things: a firmware #UD means the
+# TEST environment is misconfigured, not that the tablet cannot boot. Without
+# this check the failure reads as "32-bit UEFI handoff failed", which is wrong.
+if grep -aq "Exception Type" "$OUT/serial.log" 2>/dev/null; then
+    printf '\033[31mFIRMWARE FAULT\033[0m (not a boot-chain failure):\n'
+    grep -a -m1 "Exception Type" "$OUT/serial.log"
+    die "the IA32 firmware crashed before loading anything.
+That is a QEMU/firmware configuration problem, not evidence about the tablet.
+A secboot IA32 image needs '-machine q35,smm=on' (the harness enables this
+automatically when it detects a secboot image)." 1
 fi
 
 # Evidence thresholds, deliberately conservative:
