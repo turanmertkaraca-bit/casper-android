@@ -225,12 +225,41 @@ fi
 sleep 20
 do_shot "$OUT/boot-20s.ppm"; info "captured boot-20s.ppm (firmware + loader)"
 
-# Phase 2: select the default GRUB entry. GRUB's menu appears by ~20 s; Enter
-# starts the highlighted entry. Sent twice with a gap because the first may
-# land before the menu is listening.
+# Phase 2: edit the GRUB entry to add console=ttyS0, then boot it.
+#
+# Why go to this trouble: Android-x86's own grub config never puts
+# console=ttyS0 on the kernel cmdline, so a *successful* boot is silent on
+# serial. Without serial we can only see pixels, and pixels cannot distinguish
+# a dark GRUB menu from a kernel console (that exact mistake was made once
+# already). Editing the cmdline in GRUB is what turns "something rendered" into
+# "the kernel definitely started".
+#
+# GRUB: `E` edits the highlighted entry, the appended text goes at the end of
+# the `linux` line, `Ctrl-x`/`F10` boots. Keys are sent with generous gaps
+# because the menu takes a moment to accept input.
 sleep 6
-do_key "ret"; sleep 3; do_key "ret"
-info "sent Enter to start the default boot entry"
+do_key "e"
+info "GRUB: opened the editor for the default entry"
+sleep 4
+
+# Move to the end of the linux line and append the console parameter.
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    do_key "end"
+done
+sleep 1
+# type " console=ttyS0,115200 earlycon ignore_loglevel"
+for k in spc c o n s o l e equal t t y S 0 comma 1 1 5 2 0 0 \
+         spc e a r l y c o n spc i g n o r e underscore l o g l e v e l; do
+    do_key "$k"
+done
+info "GRUB: appended console=ttyS0,115200 earlycon ignore_loglevel"
+sleep 2
+
+# Boot the edited entry.
+do_key "ctrl-x"
+sleep 3
+do_key "ret"
+info "GRUB: booting the edited entry"
 
 # Phase 3: sample the kernel/Android bring-up. These frames are what
 # distinguishes "GRUB menu only" from "Android actually booting".
@@ -282,43 +311,53 @@ def load_ppm(p):
 # output proves the handoff into Android succeeded. Conflating them would let a
 # menu screenshot be reported as a successful Android boot.
 def classify(w, h, px):
+    """Classify a frame by layout, not just colour.
+
+    Important limitation, learned the hard way: a dark GRUB theme and a kernel
+    console both look like "white text on black". Colour statistics cannot tell
+    them apart, and an earlier version of this script claimed "kernel console"
+    when the frame was actually GRUB's menu (it read "Android-x86 9.0-r2").
+    So kernel boot is only ever claimed from SERIAL output; pixels can only
+    establish that *a* loader rendered.
+    """
     n = min(len(px) // 3, w * h)
     if n == 0:
-        return dict(nonblack=0.0, colors=0, kind='empty', dark=0.0)
+        return dict(nonblack=0.0, colors=0, kind='empty', toprow=0.0)
     step = max(1, n // 60000)
     colors = Counter()
     nonblack = 0
     counted = 0
-    lum_sum = 0
+    top_pixels = 0
+    top_hits = 0
     for k in range(0, n, step):
         r, g, b = px[k*3], px[k*3+1], px[k*3+2]
         counted += 1
-        lum_sum += (r + g + b) // 3
+        y = k // w
+        if y < h // 5:
+            top_pixels += 1
+            if r > 100 and g > 100 and b > 100:
+                top_hits += 1
         if r or g or b:
             nonblack += 1
         if len(colors) < 8000:
             colors[(r >> 3, g >> 3, b >> 3)] += 1
     tot = counted or 1
-    frac_nonblack = nonblack / tot
-    avg_lum = lum_sum / tot
-    # GRUB's theme is a distinctive blue field with a light title bar.
+    frac = nonblack / tot
+    top_text = (top_hits / top_pixels) if top_pixels else 0.0
     blueish = sum(v for (r, g, b), v in colors.items() if b > r + 6 and b > 8) / tot
-    dark = sum(v for (r, g, b), v in colors.items() if (r + g + b) < 12) / tot
     ncol = len(colors)
 
-    if frac_nonblack < 0.01:
+    if frac < 0.01:
         kind = 'blank'
     elif blueish > 0.15 and ncol > 40:
-        kind = 'grub-menu'           # Android-x86 GRUB theme (blue)
-    elif dark > 0.85 and ncol < 60:
-        kind = 'text-on-black'       # kernel console / init messages
-    elif ncol >= 200 and avg_lum > 30:
-        kind = 'rich-ui'             # Android boot animation or UI
-    elif dark > 0.85:
-        kind = 'text-on-black'
+        kind = 'grub-theme'          # Android-x86's blue GRUB screen
+    elif ncol >= 200 and frac > 0.5:
+        kind = 'rich-ui'             # many colours across the frame
+    elif top_text > 0.02:
+        kind = 'console-like'        # text starts at the very top
     else:
-        kind = 'early-firmware'
-    return dict(nonblack=frac_nonblack, colors=ncol, kind=kind, dark=dark)
+        kind = 'dark-text'           # centred text: ambiguous (GRUB or console)
+    return dict(nonblack=frac, colors=ncol, kind=kind, toprow=top_text)
 
 frames = []
 for p in sorted(glob.glob(os.path.join(outdir, 'boot-*.ppm'))):
@@ -386,41 +425,49 @@ A secboot IA32 image needs '-machine q35,smm=on' (the harness enables this
 automatically when it detects a secboot image)." 1
 fi
 
-# Stage-aware verdict. The stages are not equivalent:
-#   early-firmware  -> firmware executed, nothing else proven
-#   grub-menu       -> the 32-bit EFI loader ran and rendered (real progress)
-#   text-on-black   -> kernel console / init: the handoff into Android started
-#   rich-ui         -> Android userspace is drawing
-# Reporting a GRUB menu as "Android booted" would be wrong, so the exit code
-# and the wording distinguish them.
+# Verdict. The ONLY definitive evidence of the kernel/Android starting is
+# serial output from the kernel, because Android-x86's cmdline omits
+# console=ttyS0 — so the harness reboots with serial injected (see below).
+# Pixels can only establish that a loader rendered something.
 KIND=$(echo "$RESULT" | sed -n 's/.*BEST .* kind=\([a-z-]*\).*/\1/p')
+SERIAL_TEXT=$(tr -d '\000' < "$OUT/serial.log" 2>/dev/null || true)
+
+if printf '%s' "$SERIAL_TEXT" | grep -qE 'Linux version [0-9]'; then
+    ok "kernel banner found in serial output"
+    printf '%s' "$SERIAL_TEXT" | grep -aoE 'Linux version [^ ]+' | head -1
+    if printf '%s' "$SERIAL_TEXT" | grep -qE 'init: |property_service|servicemanager|zygote'; then
+        ok "Android userspace reached (init/logcat activity in serial)"
+        echo
+        echo "RESULT: 32-bit UEFI -> loader -> kernel -> Android init."
+        echo "        The full handoff into Android works under IA32 firmware."
+        exit 0
+    fi
+    echo
+    echo "RESULT: the 32-bit UEFI handoff into the Android kernel WORKS."
+    echo "        Kernel booted; Android init not yet seen within ${WAIT}s."
+    exit 0
+fi
 
 case "$KIND" in
     rich-ui)
-        ok "Android userspace appears to be drawing (kind=rich-ui)"
+        ok "a rich UI is on screen (kind=rich-ui)"
         echo
-        echo "RESULT: 32-bit UEFI -> loader -> kernel -> Android UI."
-        echo "        Strongest evidence obtained: Android is running under IA32 firmware."
-        exit 0 ;;
-    text-on-black)
-        ok "kernel/init console output is being drawn (kind=text-on-black)"
-        echo
-        echo "RESULT: the 32-bit UEFI handoff into the Android kernel WORKS."
-        echo "        Kernel boot messages are on screen. Full userspace (UI) was not"
-        echo "        reached within ${WAIT}s, which is normal for Android-x86 in QEMU"
-        echo "        without hardware acceleration."
-        exit 0 ;;
-    grub-menu)
-        ok "the 32-bit EFI loader ran and rendered its menu (kind=grub-menu)"
+        echo "RESULT: 32-bit UEFI executed a loader which drew a full UI."
+        echo "        Likely Android booting, but NOT proven: no kernel banner was"
+        echo "        captured on serial. Treat as strong-but-indirect evidence."
+        exit 3 ;;
+    grub-theme|console-like|dark-text)
+        ok "a loader rendered ($KIND)"
         echo
         echo "RESULT: firmware -> 32-bit EFI loader confirmed."
-        echo "        The kernel was selected but did not draw within ${WAIT}s."
-        echo "        This proves the loader half of the chain; it does NOT prove"
-        echo "        Android booted. Increase --wait or check serial.log."
+        echo "        The loader drew a screen but no kernel banner appeared on"
+        echo "        serial, so Android booting is NOT proven at this layer."
+        echo "        (An earlier version of this script wrongly called this"
+        echo "         'kernel console'; the frame was actually GRUB's menu.)"
         exit 3 ;;
     early-firmware)
         ok "firmware rendered something (kind=early-firmware)"
-        echo "RESULT: firmware executed but no loader/kernel UI was seen. Inconclusive."
+        echo "RESULT: firmware executed but no loader UI was seen. Inconclusive."
         exit 3 ;;
     *)
         die "framebuffer is essentially blank after ${WAIT}s.

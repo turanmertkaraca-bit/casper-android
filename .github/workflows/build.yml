@@ -45,7 +45,7 @@ jobs:
             qemu-system-x86 socat ovmf ovmf-ia32 || \
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
             qemu-system-x86 socat ovmf
-          ./test/boot-iso-qemu.sh --iso ax86.iso --out /tmp/iso-boot --wait 90
+          ./test/boot-iso-qemu.sh --iso ax86.iso --out /tmp/iso-boot --wait 180
 
       - uses: actions/upload-artifact@v4
         if: always()
