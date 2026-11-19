@@ -61,6 +61,63 @@ jobs:
             /tmp/iso-boot/qemu.log
           if-no-files-found: warn
 
+  image:
+    name: Trimmed flashable image
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tooling
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            squashfs-tools xorriso isolinux syslinux-utils mtools
+
+      - name: Fetch the reference ISO
+        run: |
+          set -e
+          URL="https://downloads.sourceforge.net/project/android-x86/Release%209.0/android-x86_64-9.0-r2.iso"
+          for i in 1 2 3 4 5; do
+            curl -sL -C - --retry 3 --max-time 900 -o ax86.iso "$URL" && break
+            echo "retry $i"
+          done
+          got=$(sha1sum ax86.iso | cut -d' ' -f1)
+          [ "$got" = "1cc85b5ed7c830ff71aecf8405c7281a9c995aa0" ] \
+            || { echo "::error::ISO sha1 mismatch: $got"; exit 1; }
+          echo "ISO verified"
+
+      - name: Build the trimmed image
+        run: |
+          ./image/build-image.sh --iso ax86.iso --out casper-android.iso \
+            --work /tmp/imgwork
+
+      - name: Verify the result is still 32-bit-UEFI bootable
+        run: |
+          # The whole point of trimming is a lighter image. If the strip broke
+          # the boot chain, that is worse than shipping nothing, so re-run the
+          # hardware-compatibility checks on the OUTPUT.
+          ./test/check-iso.sh casper-android.iso
+
+      - name: Boot the trimmed image under 32-bit UEFI
+        run: |
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            qemu-system-x86 socat ovmf ovmf-ia32 || \
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            qemu-system-x86 socat ovmf
+          ./test/boot-iso-qemu.sh --iso casper-android.iso \
+            --out /tmp/trim-boot --wait 240
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: casper-android-image
+          path: |
+            casper-android.iso
+            /tmp/trim-boot/*.ppm
+            /tmp/trim-boot/serial.log
+          if-no-files-found: warn
+
   shell:
     name: Desktop shell APK
     runs-on: ubuntu-latest
