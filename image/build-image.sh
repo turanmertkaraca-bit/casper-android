@@ -226,13 +226,30 @@ mkdir -p "$(dirname "$OUT")" 2>/dev/null || true
 #     MBR/GPT and EFI partition layout stay byte-compatible with what the
 #     firmware expects
 #   - reuse the original volume ID so anything that keys off it still matches
+# -map with '/...' maps each top-level entry explicitly. A bare '-map dir /'
+# replaced the root and silently dropped /efi/boot/bootia32.efi in practice
+# (the trimmed ISO then failed the IA32 check while the original passed).
+# Listing the entries makes the copy explicit and verifiable.
+MAPARGS=()
+for entry in "$WORK/iso"/*; do
+    base=$(basename "$entry")
+    MAPARGS+=(-map "$entry" "/$base")
+done
+
 xorriso -indev "$ISO" \
     -outdev "$OUT" \
-    -map "$WORK/iso" / \
+    "${MAPARGS[@]}" \
     -boot_image any keep \
     -volid "CasperOS-Android" \
     -overwrite on >"$WORK/xorriso.log" 2>&1 \
     || die "xorriso failed to build the ISO (see $WORK/xorriso.log)"
+
+# The IA32 loader is mandatory on this tablet; fail loudly rather than ship an
+# ISO that only boots on x86-64 firmware.
+if ! xorriso -indev "$OUT" -find /efi/boot -exec lsdl 2>/dev/null | grep -qi bootia32; then
+    die "rebuilt ISO lost /efi/boot/bootia32.efi — IA32 firmware could not boot it"
+fi
+ok "bootia32.efi preserved"
 
 # Hard verification: the result MUST still contain the kernel and the EFI
 # loaders, or it is not bootable and must not be shipped.

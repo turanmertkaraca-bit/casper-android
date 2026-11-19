@@ -112,12 +112,64 @@ if jr:
 
 root = []
 root_label = None
+best_score = -1
 for label, (ext, size) in candidates:
     try:
         entries = try_root(ext, size)
     except Exception:
         continue
-    if entries and len(entries) > len(root):
+    if not entries:
+        continue
+    # Score by whether this tree can actually answer the questions we ask:
+    # does it reach bootia32.efi, and how many entries does it expose.
+    score = len(entries)
+    try:
+        ef = find_dir(entries, 'efi')
+        if ef:
+            bt = find_dir(try_root(*ef), 'boot')
+            if bt:
+                names = {n for n, e, sz, fl in try_root(*bt)}
+                if 'bootia32.efi' in names:
+                    score += 1000
+                if 'bootx64.efi' in names:
+                    score += 500
+    except Exception:
+        pass
+    if score > best_score:
+        best_score = score
+        root, root_label = entries, label
+if not root:
+    print("ERROR: could not read any directory tree", file=sys.stderr)
+    sys.exit(1)
+print("using %s tree (%d entries)" % (root_label, len(root)))
+
+root = []
+root_label = None
+best_score = -1
+for label, (ext, size) in candidates:
+    try:
+        entries = try_root(ext, size)
+    except Exception:
+        continue
+    if not entries:
+        continue
+    # Score by whether this tree can actually answer the questions we ask:
+    # does it reach bootia32.efi, and how many entries does it expose.
+    score = len(entries)
+    try:
+        ef = find_dir(entries, 'efi')
+        if ef:
+            bt = find_dir(try_root(*ef), 'boot')
+            if bt:
+                names = {n for n, e, sz, fl in try_root(*bt)}
+                if 'bootia32.efi' in names:
+                    score += 1000
+                if 'bootx64.efi' in names:
+                    score += 500
+    except Exception:
+        pass
+    if score > best_score:
+        best_score = score
         root, root_label = entries, label
 if not root:
     print("ERROR: could not read any directory tree", file=sys.stderr)
