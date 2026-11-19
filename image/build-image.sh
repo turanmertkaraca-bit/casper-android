@@ -241,6 +241,8 @@ for f in kernel initrd.img boot/grub/efi.img efi/boot/bootia32.efi; do
         || die "rebuilt ISO is missing /$f — it would not boot"
 done
 ok "rebuilt ISO contains kernel, initrd and both EFI loaders"
+info "rebuilt ISO top level:"
+xorriso -indev "$OUT" -find / -maxdepth 1 -exec lsdl 2>/dev/null | sed 's/^/    /' || true
 
 ok "ISO: $OUT ($(du -h "$OUT" | cut -f1))"
 

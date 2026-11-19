@@ -155,6 +155,8 @@ def find_file_deep(entries, want, depth=2):
     return None
 
 kern = find_file_deep(root, 'kernel', depth=3)
+if not kern:
+    print("  root entries:", [n for n, e, sz, fl in root][:25])
 
 if not kern:
     print("ERROR: no kernel found in ISO", file=sys.stderr)
