@@ -45,7 +45,11 @@ jobs:
             qemu-system-x86 socat ovmf ovmf-ia32 || \
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
             qemu-system-x86 socat ovmf
-          ./test/boot-iso-qemu.sh --iso ax86.iso --out /tmp/iso-boot --wait 180
+          # Patch a COPY: the original stays pristine so check-iso.sh results
+          # keep describing the real upstream ISO. The patch auto-boots and adds
+          # console=ttyS0, which is the only way to get kernel evidence.
+          python3 test/patch-iso-serial.py ax86.iso ax86-serial.iso
+          ./test/boot-iso-qemu.sh --iso ax86-serial.iso --out /tmp/iso-boot --wait 180
 
       - uses: actions/upload-artifact@v4
         if: always()

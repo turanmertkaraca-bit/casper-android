@@ -225,41 +225,12 @@ fi
 sleep 20
 do_shot "$OUT/boot-20s.ppm"; info "captured boot-20s.ppm (firmware + loader)"
 
-# Phase 2: edit the GRUB entry to add console=ttyS0, then boot it.
-#
-# Why go to this trouble: Android-x86's own grub config never puts
-# console=ttyS0 on the kernel cmdline, so a *successful* boot is silent on
-# serial. Without serial we can only see pixels, and pixels cannot distinguish
-# a dark GRUB menu from a kernel console (that exact mistake was made once
-# already). Editing the cmdline in GRUB is what turns "something rendered" into
-# "the kernel definitely started".
-#
-# GRUB: `E` edits the highlighted entry, the appended text goes at the end of
-# the `linux` line, `Ctrl-x`/`F10` boots. Keys are sent with generous gaps
-# because the menu takes a moment to accept input.
-sleep 6
-do_key "e"
-info "GRUB: opened the editor for the default entry"
-sleep 4
-
-# Move to the end of the linux line and append the console parameter.
-for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-    do_key "end"
-done
-sleep 1
-# type " console=ttyS0,115200 earlycon ignore_loglevel"
-for k in spc c o n s o l e equal t t y S 0 comma 1 1 5 2 0 0 \
-         spc e a r l y c o n spc i g n o r e underscore l o g l e v e l; do
-    do_key "$k"
-done
-info "GRUB: appended console=ttyS0,115200 earlycon ignore_loglevel"
-sleep 2
-
-# Boot the edited entry.
-do_key "ctrl-x"
-sleep 3
-do_key "ret"
-info "GRUB: booting the edited entry"
+# Phase 2: this ISO was pre-patched by patch-iso-serial.py, so GRUB now has a
+# single auto-booting entry (timeout=0) whose cmdline includes
+# console=ttyS0,115200. Without that, a successful boot is silent on serial and
+# the test can only see pixels — which cannot distinguish a dark GRUB menu from
+# a kernel console. (Driving GRUB's editor with injected keystrokes was tried
+# first and did not work; a patched config is deterministic.)
 
 # Phase 3: sample the kernel/Android bring-up. These frames are what
 # distinguishes "GRUB menu only" from "Android actually booting".
