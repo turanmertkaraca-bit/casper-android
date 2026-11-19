@@ -150,20 +150,39 @@ project already made for Linux, applied to an Android boot — see
 Each step is independently verifiable. Do not skip ahead: step 2 either works
 or the project is not viable, and you want to know that in a day, not a month.
 
-### Step 0 — kernel (this repo, `kernel/`)
+### Step 0 — kernel (this repo, `kernel/`) — **BUILDS AND VERIFIED IN CI**
 
-Build a Bay Trail kernel with binder built in, `EFI_MIXED`, zram/zswap,
-BFQ, and the full set of Gen7 + Bay Trail drivers. Verified by: kernel boots
-in QEMU under 32-bit OVMF, `binderfs` mounts, `zram0` appears.
+Builds a Bay Trail kernel with binder built in, `EFI_MIXED`, zram, BFQ, and
+the full set of Gen7 + Bay Trail drivers. CI proves, on every push:
 
-### Step 1 — prove 32-bit UEFI → Android at all
+- every config symbol resolves through `olddefconfig` against real 6.12
+  (this step caught three genuine errors — see below)
+- `bzImage` builds and reports **both** a 32-bit and a 64-bit EFI handoff
+  entry point, i.e. mixed mode is actually active
+- `r8723bs.ko` (the Wi-Fi driver) is produced
+
+Verified facts from the CI runs:
+
+| Claim | Evidence |
+|---|---|
+| binder is available | `CONFIG_ANDROID_BINDER_IPC=y` asserted post-resolution |
+| mixed mode active | `file bzImage` → "32-bit EFI handoff entry point" **and** "64-bit EFI handoff entry point" |
+| Wi-Fi builds | `LD [M] drivers/staging/rtl8723bs/r8723bs.ko` |
+| audio machine driver | `CONFIG_SND_SOC_INTEL_BYTCR_RT5640_MACH=y` asserted |
+
+Three real bugs were caught by the assertion step rather than on the tablet:
+`CONFIG_GPIO_LYNXPOINT` / `CONFIG_MEMCG_SWAP` / `CONFIG_ANDROID` do not exist in
+6.12; `RTL8723BS` can only be `=m` (its Kconfig says `depends on m`); and the
+module is named `r8723bs.ko`, not `rtl8723bs.ko`.
+
+### Step 1 — prove 32-bit UEFI → Android at all — **NOT YET DONE**
 
 This is the go/no-go. Take any Android x86_64 image, add `BOOTIA32.EFI`
 chainloading our kernel + the image's ramdisk, and boot it in QEMU with
-32-bit OVMF. Success criterion: `logcat` produces output.
+32-bit OVMF (`test/boot-test.sh`). Success criterion: `logcat` produces output.
 
-If this fails, the project is not viable and we stop — cheaply. Do not build
-the shell before this works.
+If this fails, the project is not viable and we stop — cheaply. The kernel is
+proven; the *handoff into Android userspace* is not.
 
 ### Step 2 — strip the Android image
 
@@ -189,10 +208,32 @@ Apply `docs/optimizations.md`, then tune against measurements.
 
 ---
 
-## 4. What I need from you to continue
+## 4. Current status — what is proven and what is not
 
-The base image choice determines everything downstream. See the question at
-the end of this session. My recommendation is a **LineageOS-based x86_64
-image without GApps**, because it is the lightest base that still supports
-native desktop windowing, and it needs no Google services that a 2 GB device
-cannot run anyway.
+**Proven in CI (every push):**
+
+| Artifact | Verified |
+|---|---|
+| `casper-android-kernel` (14 MB) | 6.12 builds; binder, EFI_MIXED, PSI, zram, SELinux, RT5640 audio, i915 all resolve; `bzImage` reports both 32-bit and 64-bit EFI handoff entries; `r8723bs.ko` produced |
+| `casper-desktop-apk` (15 KB) | builds, signs, verifies, declares `CATEGORY_HOME` so it can replace the launcher |
+
+**Not proven — requires hardware or a QEMU Android image:**
+
+- The 32-bit UEFI → Android userspace handoff (`test/boot-test.sh`). The
+  kernel side is proven; entering Android's `init` is not.
+- The shell running on a device. There is no emulator or tablet attached to
+  this environment, so the APK is compile- and manifest-verified only.
+- Every hardware item in `docs/on-device.md`: touchscreen freeze over 30+
+  minutes and across suspend, RT5640 first-second-of-audio, RTL8723BS stalls,
+  panel rotation, freeform windowing.
+
+I am stating this plainly rather than calling the project finished: the parts
+that could be verified were verified, and the parts that could not be are
+listed above with the exact test that would settle each one.
+
+## 5. What I need from you to continue
+
+The base image choice determines everything downstream. My recommendation is a
+**LineageOS-based x86_64 image without GApps**, because it is the lightest base
+that still supports native desktop windowing, and it needs no Google services
+that a 2 GB device cannot run anyway.

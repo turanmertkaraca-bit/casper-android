@@ -110,10 +110,25 @@ if command -v file >/dev/null; then
 fi
 
 # ── kernel sanity ─────────────────────────────────────────────────────────
+# bzImage is a boot executable, not an ELF: file(1) never prints "x86-64" for
+# it. Check the EFI handoff entry points instead — these are the properties
+# that decide whether 32-bit firmware can enter this kernel at all.
 if command -v file >/dev/null; then
-    file "$KERNEL" | grep -q 'x86-64' \
-        && ok "kernel is x86-64" \
-        || die "kernel is not x86-64; Android x86_64 userspace cannot run on it"
+    DESC=$(file -b "$KERNEL" 2>/dev/null || echo "")
+    case "$DESC" in
+        *"64-bit EFI handoff entry point"*)
+            ok "kernel has a 64-bit EFI handoff entry (64-bit kernel)" ;;
+        *)
+            printf '\033[33mWARN:\033[0m no 64-bit EFI handoff entry found.\n' ;;
+    esac
+    case "$DESC" in
+        *"32-bit EFI handoff entry point"*)
+            ok "kernel has a 32-bit EFI handoff entry (EFI_MIXED active)" ;;
+        *)
+            die "kernel has no 32-bit EFI handoff entry, so EFI_MIXED is not
+compiled in. IA32 firmware cannot enter this kernel — this tablet would
+black-screen. Rebuild with CONFIG_EFI_MIXED=y and CONFIG_EFI_STUB=y." ;;
+    esac
 fi
 
 # ── boot ──────────────────────────────────────────────────────────────────
