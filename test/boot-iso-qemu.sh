@@ -402,12 +402,20 @@ fi
 # console=ttyS0 — so the harness reboots with serial injected (see below).
 # Pixels can only establish that a loader rendered something.
 KIND=$(echo "$RESULT" | sed -n 's/.*BEST .* kind=\([a-z-]*\).*/\1/p')
-SERIAL_TEXT=$(tr -d '\000' < "$OUT/serial.log" 2>/dev/null || true)
 
-if printf '%s' "$SERIAL_TEXT" | grep -qE 'Linux version [0-9]'; then
+# Read the serial log DIRECTLY rather than through a shell variable. A
+# variable round-trip through tr/printf/grep silently failed in CI once even
+# though the same bytes matched when tested by hand; a direct -a grep on the
+# file has no such failure mode and is what the evidence actually is.
+SERIAL_LOG="$OUT/serial.log"
+have_banner=0
+grep -aqE 'Linux version [0-9]' "$SERIAL_LOG" 2>/dev/null && have_banner=1
+echo "serial: $( [ -f "$SERIAL_LOG" ] && stat -c %s "$SERIAL_LOG" || echo 0 ) bytes, banner=${have_banner}"
+
+if [ "$have_banner" = 1 ]; then
     ok "kernel banner found in serial output"
-    printf '%s' "$SERIAL_TEXT" | grep -aoE 'Linux version [^ ]+' | head -1
-    if printf '%s' "$SERIAL_TEXT" | grep -qE 'init: |property_service|servicemanager|zygote'; then
+    grep -aoE 'Linux version [^ ]+' "$SERIAL_LOG" | head -1
+    if grep -aqE 'init: |property_service|servicemanager|zygote' "$SERIAL_LOG"; then
         ok "Android userspace reached (init/logcat activity in serial)"
         echo
         echo "RESULT: 32-bit UEFI -> loader -> kernel -> Android init."
