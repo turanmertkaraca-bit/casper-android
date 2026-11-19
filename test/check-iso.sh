@@ -59,13 +59,63 @@ pvd = sector(16)
 vol = pvd[40:72].decode('ascii', 'replace').strip()
 print("volume id:", vol)
 
-root_ext = struct.unpack('<I', pvd[156 + 2:156 + 6])[0]
-root_size = struct.unpack('<I', pvd[156 + 10:156 + 14])[0]
-root = read_dir(root_ext, root_size)
+def find_root(vd):
+    return (struct.unpack('<I', vd[156 + 2:156 + 6])[0],
+            struct.unpack('<I', vd[156 + 10:156 + 14])[0])
+
+def joliet_root():
+    """Return (ext, size) of the Joliet root, or None.
+
+    xorriso-built images commonly keep the real tree in the Joliet
+    supplementary volume descriptor. Reading only the primary ISO9660 tree
+    made this script report "no kernel found" on a perfectly good image.
+    """
+    for n in range(17, 32):
+        vd = sector(n)
+        if len(vd) < 2048 or vd[0:1] == b'\xff':
+            break
+        if vd[1:6] != b'CD001':
+            break
+        if vd[0:1] == b'\x02':          # supplementary volume descriptor
+            esc = vd[88:91]
+            if esc in (b'%/@', b'%/C', b'%/E'):
+                return find_root(vd)
+    return None
+
+def try_root(ext, size):
+    """Read a root dir and normalise names (Joliet is UCS-2)."""
+    out = []
+    for name, e, sz, fl in read_dir(ext, size):
+        # Joliet stores UTF-16BE; strip NULs and any escaped sequences.
+        clean = name.replace('\x00', '')
+        out.append((clean, e, sz, fl))
+    return out
+
+candidates = []
+pe = find_root(pvd)
+candidates.append(('iso9660', pe))
+jr = joliet_root()
+if jr:
+    candidates.append(('joliet', jr))
+
+root = []
+root_label = None
+for label, (ext, size) in candidates:
+    try:
+        entries = try_root(ext, size)
+    except Exception:
+        continue
+    if entries and len(entries) > len(root):
+        root, root_label = entries, label
+if not root:
+    print("ERROR: could not read any directory tree", file=sys.stderr)
+    sys.exit(1)
+print("using %s tree (%d entries)" % (root_label, len(root)))
 
 def find_dir(entries, name):
+    want = name.lower()
     for n, e, s, fl in entries:
-        if n.lower() == name.lower() and fl & 2:
+        if n.lower().split(';')[0] == want and fl & 2:
             return e, s
     return None
 
@@ -86,21 +136,25 @@ if efi:
                 print(f"  found BOOTx64.EFI   ({s} bytes)  <- 64-bit UEFI loader")
 
 # ── 2. Find the kernel and parse its boot header ──────────────────────────
-kern = None
-for n, e, s, fl in root:
-    if n.lower() == 'kernel' and not (fl & 2):
-        kern = (e, s)
-        break
-if not kern:
-    for n, e, s, fl in root:
-        if fl & 2:
-            sub = read_dir(e, s)
-            for n2, e2, s2, fl2 in sub:
-                if n2.lower() == 'kernel' and not (fl2 & 2):
-                    kern = (e2, s2)
-                    break
-        if kern:
-            break
+def find_file_deep(entries, want, depth=2):
+    """Find a regular file by name, looking a couple of levels down."""
+    want = want.lower()
+    for n, e, s, fl in entries:
+        if n.lower().split(';')[0] == want and not (fl & 2):
+            return e, s
+    if depth > 0:
+        for n, e, s, fl in entries:
+            if fl & 2:
+                try:
+                    sub = try_root(e, s)
+                except Exception:
+                    continue
+                got = find_file_deep(sub, want, depth - 1)
+                if got:
+                    return got
+    return None
+
+kern = find_file_deep(root, 'kernel', depth=3)
 
 if not kern:
     print("ERROR: no kernel found in ISO", file=sys.stderr)
