@@ -6,6 +6,75 @@ on:
   workflow_dispatch:
 
 jobs:
+  iso-compat:
+    name: Base image is 32-bit-UEFI compatible
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch the reference Android-x86 ISO
+        run: |
+          set -e
+          # Pinned to an exact release with a known SHA1. If this ever stops
+          # matching, the file changed and the compatibility result below is
+          # meaningless — fail loudly rather than testing a different image.
+          URL="https://downloads.sourceforge.net/project/android-x86/Release%209.0/android-x86_64-9.0-r2.iso"
+          expected=1cc85b5ed7c830ff71aecf8405c7281a9c995aa0
+          for i in 1 2 3 4 5; do
+            curl -sL -C - --retry 3 --max-time 600 -o ax86.iso "$URL" && break
+            echo "retry $i"
+          done
+          got=$(sha1sum ax86.iso | cut -d' ' -f1)
+          echo "sha1: $got"
+          [ "$got" = "$expected" ] || { echo "::error::ISO sha1 mismatch (got $got want $expected)"; exit 1; }
+          # Keep it for the boot test in the other job.
+          du -h ax86.iso
+
+      - name: Check 32-bit UEFI compatibility
+        run: ./test/check-iso.sh ax86.iso
+
+      - name: Boot the ISO under 32-bit OVMF (the real go/no-go)
+        run: |
+          set -e
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            qemu-system-x86 ovmf ovmf-ia32 2>/dev/null || \
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq qemu-system-x86 ovmf
+          FCODE=$(find /usr/share/OVMF /usr/share/ovmf /usr/share/edk2 -name 'OVMF32_CODE*' 2>/dev/null | head -1)
+          [ -n "$FCODE" ] || { echo "::error::no 32-bit OVMF firmware available"; exit 1; }
+          echo "firmware: $FCODE"
+          VARS=$(mktemp); truncate -s 4M "$VARS"
+          # -cpu qemu64 exposes SSE4.2/POPCNT, which Android x86_64 requires.
+          set +e
+          timeout 420 qemu-system-x86_64 \
+            -machine q35 -m 2048 -cpu qemu64 \
+            -drive if=pflash,format=raw,readonly=on,file="$FCODE" \
+            -drive if=pflash,format=raw,file="$VARS" \
+            -cdrom ax86.iso \
+            -netdev user,id=n0 -device e1000,netdev=n0 \
+            -display none -vga std -no-reboot \
+            -serial file:serial.log >/dev/null 2>&1
+          echo "qemu exit: $?"
+          set -e
+          echo "--- serial (first 60 lines) ---"
+          head -60 serial.log 2>/dev/null || echo "(no serial output)"
+          echo "--- evidence ---"
+          if grep -aqE 'Linux version|Android|init:' serial.log; then
+            echo "BOOT EVIDENCE FOUND: 32-bit UEFI firmware entered the kernel"
+            grep -aE 'Linux version' serial.log | head -2 || true
+          else
+            echo "::error::no kernel boot messages — 32-bit UEFI handoff failed"
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: iso-compat-logs
+          path: serial.log
+          if-no-files-found: warn
+
   shell:
     name: Desktop shell APK
     runs-on: ubuntu-latest
