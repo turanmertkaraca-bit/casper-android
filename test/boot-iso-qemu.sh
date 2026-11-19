@@ -353,7 +353,8 @@ for f in frames:
           % (f['name'], f['size'], f['kind'], f['nonblack'], f['colors']))
 
 # Best (most informative) frame decides.
-priority = ['rich-ui', 'text-on-black', 'grub-menu', 'early-firmware', 'blank']
+priority = ['rich-ui', 'console-like', 'dark-text', 'grub-theme',
+            'early-firmware', 'blank']
 kinds = {f['kind'] for f in frames}
 best_kind = next((k for k in priority if k in kinds), 'blank')
 best = next(f for f in frames if f['kind'] == best_kind)

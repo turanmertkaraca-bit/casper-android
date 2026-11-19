@@ -142,6 +142,7 @@ if not root:
     print("ERROR: could not read any directory tree", file=sys.stderr)
     sys.exit(1)
 print("using %s tree (%d entries)" % (root_label, len(root)))
+pass  # tree choice reported once, below
 
 root = []
 root_label = None
@@ -175,6 +176,7 @@ if not root:
     print("ERROR: could not read any directory tree", file=sys.stderr)
     sys.exit(1)
 print("using %s tree (%d entries)" % (root_label, len(root)))
+pass  # tree choice reported once, below
 
 def find_dir(entries, name):
     want = name.lower()
@@ -184,20 +186,55 @@ def find_dir(entries, name):
     return None
 
 # ── 1. Does the ISO ship a 32-bit EFI loader? ─────────────────────────────
-efi = find_dir(root, 'efi')
+#
+# Two places matter and they are NOT the same:
+#   (a) the ISO9660 tree — used when the stick is written by copying files
+#   (b) the FAT EFI System Partition image embedded in the ISO — this is what
+#       firmware actually reads when the ISO is dd'd to a USB stick.
+# xorriso may expose the same file under differently-cased/8.3 names in (a),
+# so scan the raw bytes of both rather than trusting a directory walk.
+def scan_blob_for(name, blob):
+    """Look for an EFI loader name anywhere in a blob (case-insensitive)."""
+    return blob.lower().count(name.lower())
+
 have_ia32 = False
 have_x64 = False
+
+# (a) directory tree
+efi = find_dir(root, 'efi')
 if efi:
-    boot = find_dir(read_dir(*efi), 'boot')
+    boot = find_dir(try_root(*efi), 'boot')
     if boot:
-        for n, e, s, fl in read_dir(*boot):
-            low = n.lower()
-            if low == 'bootia32.efi':
+        for n, e, s, fl in try_root(*boot):
+            if n == 'bootia32.efi':
                 have_ia32 = True
-                print(f"  found bootia32.efi  ({s} bytes)  <- 32-bit UEFI loader")
-            elif low == 'bootx64.efi':
+                print("  found bootia32.efi  (%d bytes)  <- 32-bit UEFI loader" % s)
+            elif n == 'bootx64.efi':
                 have_x64 = True
-                print(f"  found BOOTx64.EFI   ({s} bytes)  <- 64-bit UEFI loader")
+                print("  found BOOTX64.EFI   (%d bytes)  <- 64-bit UEFI loader" % s)
+
+# (b) the embedded FAT ESP image (/boot/grub/efi.img) and the El Torito boot
+# catalog. Scan those bytes directly.
+if not (have_ia32 and have_x64):
+    bootd = find_dir(root, 'boot')
+    if bootd:
+        grubd = find_dir(try_root(*bootd), 'grub')
+        if grubd:
+            img = None
+            for n, e, s, fl in try_root(*grubd):
+                if n == 'efi.img':
+                    img = (e, s)
+                    break
+            if img:
+                f.seek(img[0] * BS)
+                blob = f.read(img[1])
+                raw = blob
+                if scan_blob_for('bootia32.efi', raw):
+                    have_ia32 = True
+                    print("  found bootia32.efi inside the embedded FAT ESP")
+                if scan_blob_for('bootx64.efi', raw):
+                    have_x64 = True
+                    print("  found BOOTX64.EFI inside the embedded FAT ESP")
 
 # ── 2. Find the kernel and parse its boot header ──────────────────────────
 def find_file_deep(entries, want, depth=2):
