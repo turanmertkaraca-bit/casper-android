@@ -38,41 +38,23 @@ jobs:
         run: |
           set -e
           sudo apt-get update -qq
+          # ovmf-ia32 is a separate package on Debian/Ubuntu; the plain `ovmf`
+          # package ships only x86-64 firmware, which would make this test
+          # prove nothing about the tablet's IA32 firmware.
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-            qemu-system-x86 ovmf ovmf-ia32 2>/dev/null || \
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq qemu-system-x86 ovmf
-          FCODE=$(find /usr/share/OVMF /usr/share/ovmf /usr/share/edk2 -name 'OVMF32_CODE*' 2>/dev/null | head -1)
-          [ -n "$FCODE" ] || { echo "::error::no 32-bit OVMF firmware available"; exit 1; }
-          echo "firmware: $FCODE"
-          VARS=$(mktemp); truncate -s 4M "$VARS"
-          # -cpu qemu64 exposes SSE4.2/POPCNT, which Android x86_64 requires.
-          set +e
-          timeout 420 qemu-system-x86_64 \
-            -machine q35 -m 2048 -cpu qemu64 \
-            -drive if=pflash,format=raw,readonly=on,file="$FCODE" \
-            -drive if=pflash,format=raw,file="$VARS" \
-            -cdrom ax86.iso \
-            -netdev user,id=n0 -device e1000,netdev=n0 \
-            -display none -vga std -no-reboot \
-            -serial file:serial.log >/dev/null 2>&1
-          echo "qemu exit: $?"
-          set -e
-          echo "--- serial (first 60 lines) ---"
-          head -60 serial.log 2>/dev/null || echo "(no serial output)"
-          echo "--- evidence ---"
-          if grep -aqE 'Linux version|Android|init:' serial.log; then
-            echo "BOOT EVIDENCE FOUND: 32-bit UEFI firmware entered the kernel"
-            grep -aE 'Linux version' serial.log | head -2 || true
-          else
-            echo "::error::no kernel boot messages — 32-bit UEFI handoff failed"
-            exit 1
-          fi
+            qemu-system-x86 socat ovmf ovmf-ia32 || \
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            qemu-system-x86 socat ovmf
+          ./test/boot-iso-qemu.sh --iso ax86.iso --out /tmp/iso-boot --wait 90
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: iso-compat-logs
-          path: serial.log
+          name: iso-boot-evidence
+          path: |
+            /tmp/iso-boot/*.ppm
+            /tmp/iso-boot/serial.log
+            /tmp/iso-boot/qemu.log
           if-no-files-found: warn
 
   shell:
