@@ -70,9 +70,25 @@ jobs:
 
       - name: Install tooling
         run: |
-          sudo apt-get update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-            squashfs-tools xorriso isolinux syslinux-utils mtools
+          # Debian/Ubuntu mirrors intermittently return "Could not wait for
+          # server fd" on the hosted runners; retry with backoff rather than
+          # failing an otherwise fine build on a transient network error.
+          set -e
+          sudo apt-get update -qq -o Acquire::Retries=5 || sudo apt-get update -qq
+          for attempt in 1 2 3; do
+            if sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+                 -o Acquire::Retries=5 \
+                 squashfs-tools xorriso isolinux syslinux-utils mtools; then
+              echo "tooling installed on attempt $attempt"
+              break
+            fi
+            echo "apt attempt $attempt failed; retrying"
+            sleep $((attempt * 20))
+            [ "$attempt" = 3 ] && { echo "::error::could not install tooling"; exit 1; }
+          done
+          for t in unsquashfs mksquashfs xorriso; do
+            command -v "$t" >/dev/null || { echo "::error::$t missing after install"; exit 1; }
+          done
 
       - name: Fetch the reference ISO
         run: |
